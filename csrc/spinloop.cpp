@@ -1,3 +1,9 @@
+// spinloop uses Py_buffer / PyBuffer_Release which are not part of the
+// stable ABI (Py_LIMITED_API). Undefine it here so the full Python C API
+// is available, regardless of how the extension target is configured.
+#ifdef Py_LIMITED_API
+#undef Py_LIMITED_API
+#endif
 #include <Python.h>
 
 extern "C" {

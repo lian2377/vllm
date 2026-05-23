@@ -6160,35 +6160,18 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
-        # === Jetson cuBLAS pre-warm (full-size) ===
-        # Failure path observed on Jetson Orin (SM 8.7, unified memory):
-        #   _dummy_run (AWQ Marlin JIT fragments allocator)
-        #     -> _dummy_sampler_run
-        #     -> model.compute_logits -> lm_head FP16 -> cuBLAS
-        #     -> cublasCreate / workspace cudaMalloc -> CUBLAS_STATUS_ALLOC_FAILED
-        #
-        # Three layered causes:
-        #   (a) cuBLAS handle is created lazily on first GEMM.
-        #   (b) cuBLAS workspace is sized per GEMM shape; a larger GEMM than
-        #       previously seen triggers another cudaMalloc to expand it.
-        #   (c) On unified memory, cudaFree (via empty_cache) does not return
-        #       pages to a pool that cuBLAS's cudaMalloc can subsequently use.
-        #
-        # Fix: run the exact failing op at production size NOW, while memory
-        # is still uncontended. This forces both cublasCreate AND full
-        # workspace allocation. PyTorch caches both; the real lm_head call
-        # later reuses them with zero new cudaMalloc. Works equally for
-        # cuBLAS and cuBLASLt routes because we hit the same code path.
-        # Cost: one extra GEMM at startup; zero steady-state overhead.
+        # Pre-warm the cuBLAS handle BEFORE AWQ JIT compilation.
+        # cuBLAS allocates its handle lazily via cudaMalloc on first use.
+        # On Jetson unified memory, cudaFree (called by empty_cache) does not
+        # reliably return pages to the CUDA allocator pool in time for a
+        # subsequent cudaMalloc by cublasCreate. Pre-warming ensures the handle
+        # is allocated while memory is still clean, and PyTorch reuses it for
+        # all later calls without re-allocating.
         if get_pp_group().is_last_rank and not self.is_pooling_model:
-            _warmup_hidden = torch.empty(
-                self.max_num_tokens,
-                self.model_config.get_hidden_size(),
-                device=self.device,
-                dtype=self.dtype,
-            )
-            self.model.compute_logits(_warmup_hidden)
-            del _warmup_hidden
+            _w = torch.zeros(1, 1, device=self.device, dtype=torch.float16)
+            torch.nn.functional.linear(_w, _w)
+            del _w
+            torch.accelerator.empty_cache()
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(

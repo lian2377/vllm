@@ -6160,19 +6160,6 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
-        # Pre-warm the cuBLAS handle BEFORE AWQ JIT compilation.
-        # cuBLAS allocates its handle lazily via cudaMalloc on first use.
-        # On Jetson unified memory, cudaFree (called by empty_cache) does not
-        # reliably return pages to the CUDA allocator pool in time for a
-        # subsequent cudaMalloc by cublasCreate. Pre-warming ensures the handle
-        # is allocated while memory is still clean, and PyTorch reuses it for
-        # all later calls without re-allocating.
-        if get_pp_group().is_last_rank and not self.is_pooling_model:
-            _w = torch.zeros(1, 1, device=self.device, dtype=torch.float16)
-            torch.nn.functional.linear(_w, _w)
-            del _w
-            torch.accelerator.empty_cache()
-
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
@@ -6181,6 +6168,12 @@ class GPUModelRunner(
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
             else:
+                # Flush PyTorch caching allocator before lm_head triggers
+                # cublasCreate(). AWQ JIT compilation leaves large blocks in
+                # the free-list that are invisible to cudaMalloc, causing
+                # CUBLAS_STATUS_ALLOC_FAILED on memory-constrained devices
+                # (e.g. Jetson Orin with unified memory).
+                torch.accelerator.empty_cache()
                 output = self._dummy_sampler_run(last_hidden_states)
         else:
             output = None

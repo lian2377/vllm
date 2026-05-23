@@ -6168,12 +6168,6 @@ class GPUModelRunner(
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
             else:
-                # Flush PyTorch caching allocator before lm_head triggers
-                # cublasCreate(). AWQ JIT compilation leaves large blocks in
-                # the free-list that are invisible to cudaMalloc, causing
-                # CUBLAS_STATUS_ALLOC_FAILED on memory-constrained devices
-                # (e.g. Jetson Orin with unified memory).
-                torch.accelerator.empty_cache()
                 output = self._dummy_sampler_run(last_hidden_states)
         else:
             output = None

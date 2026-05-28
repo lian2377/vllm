@@ -140,15 +140,28 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Preserve the target's forced TRITON_ATTN backend for draft layers.
+        """Preserve the target's forced TRITON_ATTN backend for draft layers,
+        and replace model_config/quant_config with the draft model's own values.
 
         Gemma4 forces TRITON_ATTN due to heterogeneous head dimensions
         (head_dim=256 sliding, global_head_dim=512 full). The base class
         resets attention_config.backend to None for draft models, causing
         sliding layers to fall back to FLASH_ATTN which cannot handle
         KV-shared cache. Override to carry the target's backend through.
+
+        Also replaces model_config and quant_config with draft model's own
+        values. SpecDecodeBaseProposer._get_model() passes vllm_config (built
+        from the target's config) to the model constructor, but
+        Gemma4ForConditionalGeneration.__init__ reads
+        vllm_config.model_config.hf_config to determine
+        hidden_size_per_layer_input. Without this replacement the target's value
+        (0 for 26B) is used instead of the draft's (256 for E4B), so
+        per_layer_input_gate initialises to None and load_weights crashes with
+        KeyError on layers.*.per_layer_input_gate.weight.
         """
         base = super()._create_draft_vllm_config()
+
+        # Carry target's attention backend through (original logic unchanged)
         target_backend = self.vllm_config.attention_config.backend
         if target_backend is not None:
             base = replace(
@@ -158,7 +171,19 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                     backend=target_backend,
                 ),
             )
-        return base
+
+        # Replace model_config and quant_config with draft model's own values.
+        # VllmConfig.quant_config is an independent field; replace() on model_config
+        # alone does not re-derive it, so both must be updated explicitly.
+        draft_model_config = self.speculative_config.draft_model_config
+        draft_quant_config = VllmConfig.get_quantization_config(
+            draft_model_config, self.vllm_config.load_config
+        )
+        return replace(
+            base,
+            model_config=draft_model_config,
+            quant_config=draft_quant_config,
+        )
 
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
         """Gemma4 MTP always keeps its own draft-dim lm_head.

@@ -67,9 +67,46 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
     @override
     def _get_model(self) -> nn.Module:
+        import re as _re
+
         from vllm.compilation.backends import set_model_tag
+        from vllm.model_executor.models import ModelRegistry
 
         draft_vllm_config = self._create_draft_vllm_config()
+
+        # compressed-tensors uses exact string matching for its ignore list.
+        # Because get_model is called with prefix="draft_model", every layer's
+        # vLLM prefix begins with "draft_model." — but _maybe_apply_model_mapping
+        # (called in __new__) only remaps HF→vLLM names without adding that
+        # prefix, so should_ignore_layer returns False for layers that should
+        # be ignored (e.g. per_layer_input_gate).  Those layers are then
+        # initialised as quantised (qweight/scales instead of .weight), while
+        # the checkpoint stores them as plain float — causing KeyError in
+        # load_weights.
+        #
+        # Fix: pre-apply the model mapper here, then convert every exact-path
+        # ignore entry to a prefix-agnostic regex so it matches both standalone
+        # and "draft_model."-prefixed layer names.
+        quant_config = draft_vllm_config.quant_config
+        if quant_config is not None and getattr(quant_config, "ignore", None):
+            try:
+                model_cls, _ = ModelRegistry.resolve_model_cls(
+                    draft_vllm_config.model_config.hf_config.architectures,
+                    draft_vllm_config.model_config,
+                )
+                mapper = getattr(model_cls, "hf_to_vllm_mapper", None)
+                if mapper is not None:
+                    quant_config.apply_vllm_mapper(mapper)
+            except Exception:
+                pass
+
+            quant_config.ignore = [
+                f"re:(?:.*\\.)?{_re.escape(entry)}$"
+                if "." in entry and not entry.startswith("re:")
+                else entry
+                for entry in quant_config.ignore
+            ]
+
         with set_model_tag("draft_model"):
             model = get_model(
                 vllm_config=draft_vllm_config,

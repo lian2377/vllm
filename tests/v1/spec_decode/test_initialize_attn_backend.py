@@ -230,3 +230,73 @@ def test_validate_same_kv_cache_group_no_longer_raises():
 
     p = _make_proposer({"layer.0.attn", "layer.1.attn"})
     p.validate_same_kv_cache_group(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Gemma4Proposer._build_layer_spec_mapping — KV-sharing fallback
+# ---------------------------------------------------------------------------
+
+def test_gemma4_build_layer_spec_mapping_kv_sharing_fallback():
+    """Layer without own spec in UniformTypeKVCacheSpecs inherits target's spec."""
+    from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
+
+    tgt_spec = mock.MagicMock(name="tgt_spec")
+    per_layer = {"layer.0.self_attn.attn": tgt_spec}
+    us = _make_uniform_spec(per_layer)
+    # layer.1 is a KV-sharing layer that doesn't have its own spec
+    group = _make_kv_cache_group(
+        ["layer.0.self_attn.attn", "layer.1.self_attn.attn"], us
+    )
+    cfg = _make_kv_cache_config([group])
+
+    attn_layer_0 = mock.MagicMock(spec=[])  # no kv_sharing_target_layer_name
+    attn_layer_1 = mock.MagicMock(spec=["kv_sharing_target_layer_name"])
+    attn_layer_1.kv_sharing_target_layer_name = "layer.0.self_attn.attn"
+    all_attn = {
+        "layer.0.self_attn.attn": attn_layer_0,
+        "layer.1.self_attn.attn": attn_layer_1,
+    }
+
+    p = object.__new__(Gemma4Proposer)
+    p._draft_attn_layer_names = {"layer.0.self_attn.attn", "layer.1.self_attn.attn"}
+    p.vllm_config = mock.MagicMock()
+    p.device = "cpu"
+    p.draft_attn_groups = []
+    p.kv_cache_gid = -1
+    p.block_size = -1
+
+    gid_map, spec_map = p._build_layer_spec_mapping(cfg, all_attn)
+
+    assert spec_map["layer.0.self_attn.attn"] is tgt_spec
+    assert spec_map["layer.1.self_attn.attn"] is tgt_spec
+
+
+def test_gemma4_build_layer_spec_mapping_no_kv_sharing():
+    """Layer without kv_sharing_target_layer_name falls back to group spec."""
+    from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
+
+    per_layer = {"layer.0.self_attn.attn": mock.MagicMock(name="spec_0")}
+    us = _make_uniform_spec(per_layer)
+    group = _make_kv_cache_group(
+        ["layer.0.self_attn.attn", "layer.1.self_attn.attn"], us
+    )
+    cfg = _make_kv_cache_config([group])
+
+    attn_layer = mock.MagicMock(spec=[])  # no attributes → getattr returns default
+    all_attn = {
+        "layer.0.self_attn.attn": attn_layer,
+        "layer.1.self_attn.attn": attn_layer,
+    }
+
+    p = object.__new__(Gemma4Proposer)
+    p._draft_attn_layer_names = {"layer.0.self_attn.attn", "layer.1.self_attn.attn"}
+    p.vllm_config = mock.MagicMock()
+    p.device = "cpu"
+    p.draft_attn_groups = []
+    p.kv_cache_gid = -1
+    p.block_size = -1
+
+    gid_map, spec_map = p._build_layer_spec_mapping(cfg, all_attn)
+
+    # layer.1 has no kv_sharing_target_layer_name → falls back to group spec
+    assert spec_map["layer.1.self_attn.attn"] is us

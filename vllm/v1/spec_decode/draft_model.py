@@ -5,11 +5,14 @@ import torch
 import torch.nn as nn
 from typing_extensions import override
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import replace
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -113,6 +116,78 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 prefix="draft_model",
             )
         return model
+
+    @override
+    def initialize_attn_backend(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
+        """Initialize AttentionGroups for draft layers, supporting multiple KV groups.
+
+        The base class assumes all draft layers share a single KV cache group.
+        Draft models with heterogeneous attention (e.g. Gemma4's sliding-window
+        vs full-attention layers) span multiple KV cache groups, so we override
+        here to create one AttentionGroup per unique (backend, group) pair.
+        """
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+
+        layer_to_gid: dict[str, int] = {}
+        layer_to_spec: dict[str, object] = {}
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            for ln in group.layer_names:
+                layer_to_gid[ln] = gid
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_to_spec[ln] = group_spec.kv_cache_specs.get(ln, group_spec)
+                else:
+                    layer_to_spec[ln] = group_spec
+
+        attention_groups: dict[tuple, AttentionGroup] = {}
+        for layer_name in self._draft_attn_layer_names:
+            if layer_name not in layer_to_spec or layer_name not in all_attn_layers:
+                continue
+            attn_backend = all_attn_layers[layer_name].get_attn_backend()
+            spec = layer_to_spec[layer_name]
+            gid = layer_to_gid[layer_name]
+            group_key = (attn_backend.full_cls_name(), gid)
+
+            if group_key not in attention_groups:
+                kernel_block_size = (
+                    kernel_block_sizes[gid]
+                    if kernel_block_sizes is not None and gid < len(kernel_block_sizes)
+                    else None
+                )
+                attn_group = AttentionGroup(
+                    backend=attn_backend,
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                    kv_cache_group_id=gid,
+                )
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    kernel_block_size=kernel_block_size,
+                )
+                attention_groups[group_key] = attn_group
+            else:
+                attention_groups[group_key].layer_names.append(layer_name)
+
+        self.draft_attn_groups = list(attention_groups.values())
+        if self.draft_attn_groups:
+            self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
+            self.block_size = (
+                self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
+            )
+        else:
+            self.kv_cache_gid = 0
+            self.block_size = (
+                kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+            )
+        logger.debug("Using block size %d for drafting layers", self.block_size)
 
     @override
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:

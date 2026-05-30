@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from importlib.util import find_spec
 from typing import Any, cast
 
@@ -54,6 +55,13 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+# Debug instrumentation: set VLLM_SPEC_DEBUG_PROPOSE=<N> to log details
+# about the first N calls to SpecDecodeBaseProposer.propose() (inputs,
+# context, hidden-state stats, draft tokens).  Defaults to 0 (disabled).
+_SPEC_DBG_MAX = int(os.environ.get("VLLM_SPEC_DEBUG_PROPOSE", "0"))
+_spec_dbg_idx = [0]
 
 
 class SpecDecodeBaseProposer:
@@ -444,6 +452,50 @@ class SpecDecodeBaseProposer:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
+        _dbg = _spec_dbg_idx[0] < _SPEC_DBG_MAX
+        if _dbg:
+            _i = _spec_dbg_idx[0]
+            _tt = target_token_ids
+            _tp = (
+                target_positions
+                if target_positions.dim() == 1
+                else target_positions[0]
+            )
+            print(
+                f"[SPEC_DBG #{_i}] === propose start === "
+                f"batch_size={batch_size} num_spec={self.num_speculative_tokens} "
+                f"method={self.method} supports_mm={self.supports_mm_inputs} "
+                f"constant_draft_positions={self.constant_draft_positions}",
+                flush=True,
+            )
+            print(
+                f"[SPEC_DBG #{_i}] target_token_ids.shape={_tt.shape} "
+                f"tail={_tt[-min(8, _tt.shape[0]):].tolist()}",
+                flush=True,
+            )
+            print(
+                f"[SPEC_DBG #{_i}] target_positions tail="
+                f"{_tp[-min(8, _tp.shape[0]):].tolist()}",
+                flush=True,
+            )
+            print(
+                f"[SPEC_DBG #{_i}] next_token_ids={next_token_ids.tolist()}",
+                flush=True,
+            )
+            if num_rejected_tokens_gpu is not None:
+                print(
+                    f"[SPEC_DBG #{_i}] num_rejected_tokens_gpu="
+                    f"{num_rejected_tokens_gpu.tolist()}",
+                    flush=True,
+                )
+            if mm_embed_inputs is not None:
+                _ime = mm_embed_inputs[1]
+                print(
+                    f"[SPEC_DBG #{_i}] mm_embeds_count={len(mm_embed_inputs[0])} "
+                    f"is_mm_embed.shape={_ime.shape} sum={_ime.sum().item()}",
+                    flush=True,
+                )
+
         if self.method in ("eagle3", "dflash"):
             assert isinstance(
                 self.model,
@@ -482,6 +534,34 @@ class SpecDecodeBaseProposer:
             num_tokens, num_input_tokens, mm_embed_inputs
         )
 
+        if _dbg:
+            _i = _spec_dbg_idx[0]
+            print(
+                f"[SPEC_DBG #{_i}] num_tokens={num_tokens} "
+                f"num_input_tokens={num_input_tokens}",
+                flush=True,
+            )
+            print(
+                f"[SPEC_DBG #{_i}] input_ids[:num_tokens]="
+                f"{self.input_ids[:num_tokens].tolist()}",
+                flush=True,
+            )
+            _pos_buf = (
+                self.mrope_positions[0, :num_tokens]
+                if self.uses_mrope
+                else self.positions[:num_tokens]
+            )
+            print(
+                f"[SPEC_DBG #{_i}] positions[:num_tokens]={_pos_buf.tolist()}",
+                flush=True,
+            )
+            if token_indices_to_sample is not None:
+                print(
+                    f"[SPEC_DBG #{_i}] token_indices_to_sample="
+                    f"{token_indices_to_sample.tolist()}",
+                    flush=True,
+                )
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -499,6 +579,18 @@ class SpecDecodeBaseProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
 
+        if _dbg:
+            _i = _spec_dbg_idx[0]
+            _lh = last_hidden_states.float()
+            print(
+                f"[SPEC_DBG #{_i}] first forward: lh.shape={last_hidden_states.shape} "
+                f"mean={_lh.mean().item():.4f} std={_lh.std().item():.4f} "
+                f"min={_lh.min().item():.4f} max={_lh.max().item():.4f} "
+                f"has_nan={torch.isnan(_lh).any().item()} "
+                f"has_inf={torch.isinf(_lh).any().item()}",
+                flush=True,
+            )
+
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
         # Early exit if there is only one draft token to be generated.
@@ -510,6 +602,15 @@ class SpecDecodeBaseProposer:
                 self._last_draft_probs = draft_probs.view(
                     -1, self.num_speculative_tokens, draft_probs.shape[-1]
                 ).contiguous()
+            if _dbg:
+                _i = _spec_dbg_idx[0]
+                print(
+                    f"[SPEC_DBG #{_i}] single-token path: "
+                    f"draft_token_ids={draft_token_ids.tolist()}",
+                    flush=True,
+                )
+                print(f"[SPEC_DBG #{_i}] === propose end ===", flush=True)
+                _spec_dbg_idx[0] += 1
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:
@@ -639,6 +740,22 @@ class SpecDecodeBaseProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
             self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
+
+        if _dbg:
+            _i = _spec_dbg_idx[0]
+            _all = [t.tolist() for t in draft_token_ids_list]
+            print(
+                f"[SPEC_DBG #{_i}] all draft tokens per step: {_all}",
+                flush=True,
+            )
+            print(
+                f"[SPEC_DBG #{_i}] final draft_token_ids.shape="
+                f"{draft_token_ids.shape} content={draft_token_ids.tolist()}",
+                flush=True,
+            )
+            print(f"[SPEC_DBG #{_i}] === propose end ===", flush=True)
+            _spec_dbg_idx[0] += 1
+
         return draft_token_ids
 
     def _update_positions_dependent_metadata(

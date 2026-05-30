@@ -59,13 +59,15 @@ logger = init_logger(__name__)
 
 # Debug instrumentation: log details about the first N calls to
 # SpecDecodeBaseProposer.propose() (inputs, context, hidden-state stats,
-# draft tokens).
+# draft tokens). Defaults to 0 (disabled) so normal users see no extra
+# output.
 #
-# vLLM forks EngineCore via "spawn" with a filtered env, so reading
-# os.environ here would only see the APIServer's environment, not the
-# EngineCore's. We hard-code the cap to keep instrumentation reliable
-# across all subprocesses. Set to 0 to disable.
-_SPEC_DBG_MAX = int(os.environ.get("VLLM_SPEC_DEBUG_PROPOSE", "5"))
+# To enable in this repo: set VLLM_SPEC_DEBUG_PROPOSE=<N> *and* make sure
+# the EngineCore subprocess inherits it (vLLM's NUMA-wrapper spawn does
+# not forward arbitrary env vars). If env forwarding is unreliable in
+# your launcher, temporarily change the default below to a small N and
+# rebuild.
+_SPEC_DBG_MAX = int(os.environ.get("VLLM_SPEC_DEBUG_PROPOSE", "0"))
 _spec_dbg_idx = [0]
 
 

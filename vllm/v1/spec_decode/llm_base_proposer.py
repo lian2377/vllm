@@ -836,6 +836,24 @@ class SpecDecodeBaseProposer:
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
+            # is_mm_embed is built upstream from total_num_scheduled_tokens.
+            # set_inputs_first_pass appends next_token_ids per request to
+            # input_ids, lengthening it to num_tokens. next_token_ids are
+            # sampled text tokens (never multimodal placeholders), so pad
+            # is_mm_embed with False to align shapes for embed_input_ids.
+            if is_mm_embed is not None and is_mm_embed.shape[0] < num_tokens:
+                pad_len = num_tokens - is_mm_embed.shape[0]
+                is_mm_embed = torch.cat(
+                    [
+                        is_mm_embed,
+                        torch.zeros(
+                            pad_len,
+                            dtype=torch.bool,
+                            device=is_mm_embed.device,
+                        ),
+                    ]
+                )
+
             self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
                 self.input_ids[:num_tokens],
                 multimodal_embeddings=mm_embeds,

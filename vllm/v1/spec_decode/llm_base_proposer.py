@@ -57,10 +57,15 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
-# Debug instrumentation: set VLLM_SPEC_DEBUG_PROPOSE=<N> to log details
-# about the first N calls to SpecDecodeBaseProposer.propose() (inputs,
-# context, hidden-state stats, draft tokens).  Defaults to 0 (disabled).
-_SPEC_DBG_MAX = int(os.environ.get("VLLM_SPEC_DEBUG_PROPOSE", "0"))
+# Debug instrumentation: log details about the first N calls to
+# SpecDecodeBaseProposer.propose() (inputs, context, hidden-state stats,
+# draft tokens).
+#
+# vLLM forks EngineCore via "spawn" with a filtered env, so reading
+# os.environ here would only see the APIServer's environment, not the
+# EngineCore's. We hard-code the cap to keep instrumentation reliable
+# across all subprocesses. Set to 0 to disable.
+_SPEC_DBG_MAX = int(os.environ.get("VLLM_SPEC_DEBUG_PROPOSE", "5"))
 _spec_dbg_idx = [0]
 
 

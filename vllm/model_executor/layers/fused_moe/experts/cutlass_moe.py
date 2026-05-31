@@ -704,15 +704,20 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         # SILU uses a fused silu+mul+fp4_quant kernel path.
         # Other gated activations use the generic apply_moe_activation()
         # fallback + separate fp4 quantization in run_cutlass_moe_fp4().
+        # apply_moe_activation already implements GELU_TANH via
+        # torch.ops._C.gelu_tanh_and_mul, so the generic fallback handles it
+        # identically to GELU.
         # Non-gated activations (_NO_MUL) are also supported for models
         # like Nemotron-Nano that don't use gated MLP.
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
             MoEActivation.RELU2_NO_MUL,
         ]
 

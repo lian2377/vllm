@@ -91,6 +91,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
     PerTensorScaleParameter,
+    RowvLLMParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
@@ -109,6 +110,10 @@ QUANT_ALGOS = [
     "FP8_PB_WO",
     # NVFP4 W4A4 (4-bit float weights AND 4-bit float activations).
     "NVFP4",
+    # NVFP4 W4A4 with AWQ-calibrated per-input-channel activation smoothing.
+    # On-disk weight layout is identical to plain NVFP4 (has_zero_point: false);
+    # checkpoint additionally carries per-layer `pre_quant_scale` (1-D bf16).
+    "NVFP4_AWQ",
     # W4A16 NVFP4 (4-bit float weights, fp16/bf16 activations).
     "W4A16_NVFP4",
     # MXFP8
@@ -1012,12 +1017,14 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None = None,
         exclude_modules: list[str] | None = None,
         group_size: int = 16,
+        has_pre_quant_scale: bool = False,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
         super().__init__(exclude_modules)
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
+        self.has_pre_quant_scale = has_pre_quant_scale
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
                 "Detected ModelOpt NVFP4 checkpoint (quant_algo=%s). Please "
@@ -1030,16 +1037,19 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             self.kv_cache_quant_algo = kv_cache_quant_algo
 
         # Select LinearMethod implementation based on quant_algo (FP8 pattern).
-        # NVFP4         -> W4A4: cutlass NVFP4 GEMM with input quantization
-        # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
-        if quant_method == "NVFP4":
+        # NVFP4 / NVFP4_AWQ -> W4A4: cutlass NVFP4 GEMM with input quantization.
+        #   NVFP4_AWQ additionally applies a per-input-channel `pre_quant_scale`
+        #   to activations before the GEMM (AWQ smoothing). Weight layout is
+        #   identical to plain NVFP4.
+        # W4A16_NVFP4       -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
+        if quant_method in ("NVFP4", "NVFP4_AWQ"):
             self.LinearMethodCls = ModelOptNvFp4LinearMethod
         elif quant_method == "W4A16_NVFP4":
             self.LinearMethodCls = ModelOptNvFp4W4A16LinearMethod
         else:
             raise ValueError(
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
-                "Supported: NVFP4 / W4A16_NVFP4."
+                "Supported: NVFP4 / NVFP4_AWQ / W4A16_NVFP4."
             )
 
     def get_name(self) -> QuantizationMethods:
@@ -1078,6 +1088,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             group_size = 16  # Default value
 
         # For FP4, these fields are required
+        has_pre_quant_scale = False
         if is_checkpoint_nvfp4_serialized and "quantization" in original_config:
             # Check if required fields are present in the quantization config
             quant_config = original_config["quantization"]
@@ -1090,6 +1101,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                     f"NVFP4 quantization requires the following fields in "
                     f"hf_quant_config.json: {missing_fields}"
                 )
+            has_pre_quant_scale = bool(quant_config.get("pre_quant_scale", False))
 
         return cls(
             quant_method,
@@ -1097,6 +1109,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            has_pre_quant_scale,
         )
 
 
@@ -1190,6 +1203,20 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
+        # AWQ pre-quant scale: per-input-channel multiplier applied to
+        # activations before NVFP4 input quantization. Only present when the
+        # checkpoint was produced by ModelOpt with `pre_quant_scale: true`
+        # (quant_algo NVFP4_AWQ). Row-parallel sharding: sliced along dim 0
+        # by input_size_per_partition. For ReplicatedLinear / non-sharded
+        # callers the row-parallel loader is a no-op slice.
+        if self.quant_config.has_pre_quant_scale:
+            pre_quant_scale = RowvLLMParameter(
+                data=torch.empty(input_size_per_partition, dtype=torch.bfloat16),
+                input_dim=0,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("pre_quant_scale", pre_quant_scale)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if (
             torch.unique(layer.input_scale).numel() != 1
@@ -1220,8 +1247,17 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
 
+        # Stash pre_quant_scale across kernel format conversion so apply()
+        # can still find it on the layer afterwards.
+        pre_quant_scale = getattr(layer, "pre_quant_scale", None)
+
         # Convert layer to NVFP4 linear kernel format
         self.kernel.process_weights_after_loading(layer)
+
+        if pre_quant_scale is not None and not hasattr(layer, "pre_quant_scale"):
+            layer.pre_quant_scale = Parameter(
+                pre_quant_scale.data.detach(), requires_grad=False
+            )
 
     def apply(
         self,
@@ -1229,6 +1265,13 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # AWQ activation smoothing: applied per-input-channel before
+        # NVFP4 input quantization.  Only NVFP4_AWQ checkpoints register
+        # this parameter (see create_weights); plain NVFP4 layers skip
+        # the multiply entirely.
+        pre_quant_scale = getattr(layer, "pre_quant_scale", None)
+        if pre_quant_scale is not None:
+            x = x * pre_quant_scale.to(x.dtype)
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
@@ -1391,6 +1434,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         moe_config: FusedMoEConfig,
     ) -> None:
         super().__init__(moe_config)
+        if getattr(quant_config, "has_pre_quant_scale", False):
+            raise NotImplementedError(
+                "NVFP4_AWQ (pre_quant_scale) on MoE layers is not yet "
+                "implemented in vLLM. The modular NVFP4 MoE kernel has no "
+                "hook for per-input-channel activation smoothing, and "
+                "folding pre_quant_scale into per-group fp8 weight scales "
+                "is lossy. Use the dense NVFP4_AWQ path (Linear only) or a "
+                "plain NVFP4 / W4A16_NVFP4 checkpoint for MoE models."
+            )
         self.quant_config = quant_config
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(

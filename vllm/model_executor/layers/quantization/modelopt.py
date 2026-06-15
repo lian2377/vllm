@@ -1280,6 +1280,19 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             x = x * pre_quant_scale.to(x.dtype)
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens):
+        # When tie_word_embeddings=True (e.g. Gemma 4 12B), lm_head shares
+        # the (bf16) embedding tensor and the NVFP4 path is no longer
+        # applicable. Swap to UnquantizedEmbeddingMethod whose apply() does
+        # a plain bf16/fp16 GEMM, then delegate the actual tie.
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            UnquantizedEmbeddingMethod,
+        )
+
+        unquant = UnquantizedEmbeddingMethod()
+        layer.quant_method = unquant
+        return unquant.tie_weights(layer, embed_tokens)
+
 
 class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt NVFP4 W4A16.

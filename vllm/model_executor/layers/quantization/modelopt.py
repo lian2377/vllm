@@ -191,7 +191,12 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # handle exclusion
         if self.is_layer_excluded(prefix):
-            if isinstance(layer, (LinearBase, ParallelLMHead)):
+            # ParallelLMHead must fall through to UnquantizedEmbeddingMethod
+            # (which implements tie_weights); UnquantizedLinearMethod does not,
+            # so tie_word_embeddings models crash at init (Gemma 4 12B NVFP4).
+            if isinstance(layer, ParallelLMHead):
+                return None
+            if isinstance(layer, LinearBase):
                 return UnquantizedLinearMethod()
             return None
 

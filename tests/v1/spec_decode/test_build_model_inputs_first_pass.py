@@ -5,6 +5,7 @@ Verifies that is_mm_embed is correctly aligned with input_ids when
 set_inputs_first_pass has appended next_token_ids per request.
 All tests run without GPU.
 """
+
 from unittest import mock
 
 import torch

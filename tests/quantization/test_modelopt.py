@@ -14,7 +14,6 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.config.model import ModelConfig
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptMixedPrecisionConfig,
@@ -110,7 +109,18 @@ def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
 
     method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
-    assert isinstance(method, UnquantizedLinearMethod)
+    assert method is None
+
+
+def test_modelopt_mixed_precision_leaves_excluded_parallel_lm_head_unquantized():
+    config = _mixed_precision_config(
+        {"model.layers.0.self_attn.q_proj": {"quant_algo": "FP8"}}
+    )
+    config.exclude_modules = ["lm_head"]
+
+    method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
+
+    assert method is None
 
 
 def test_modelopt_mixed_precision_quantizes_parallel_lm_head():

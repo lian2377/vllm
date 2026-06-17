@@ -4,6 +4,7 @@
 Tests run without GPU. We mock VllmConfig and SpeculativeConfig
 so no model weights are downloaded.
 """
+
 from types import SimpleNamespace
 from unittest import mock
 

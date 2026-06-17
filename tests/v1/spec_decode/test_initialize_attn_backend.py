@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for SpecDecodeBaseProposer._build_layer_spec_mapping and
 initialize_attn_backend.  All tests run without GPU."""
+
 from unittest import mock
 
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
@@ -9,9 +10,11 @@ from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_uniform_spec(layer_specs: dict):
     """Build a mock UniformTypeKVCacheSpecs with the given per-layer specs."""
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
     us = mock.MagicMock(spec=UniformTypeKVCacheSpecs)
     us.kv_cache_specs = layer_specs
     return us
@@ -45,6 +48,7 @@ def _make_proposer(draft_attn_layer_names: set[str]) -> SpecDecodeBaseProposer:
 # ---------------------------------------------------------------------------
 # _build_layer_spec_mapping — base class
 # ---------------------------------------------------------------------------
+
 
 def test_build_layer_spec_mapping_single_group():
     """Single homogeneous group → all layers get same (gid=0, spec)."""
@@ -121,6 +125,7 @@ def test_build_layer_spec_mapping_uniform_missing_key_fallback():
 # initialize_attn_backend — single group backward-compat
 # ---------------------------------------------------------------------------
 
+
 def test_initialize_attn_backend_single_group_creates_one_group():
     """Single group → one AttentionGroup created."""
     spec = mock.MagicMock(name="spec")
@@ -183,19 +188,21 @@ def test_initialize_attn_backend_multi_group_creates_two_groups():
         "draft_model.model.layers.1.self_attn.attn": attn_layer,
     }
 
-    p = _make_proposer({
-        "draft_model.model.layers.0.self_attn.attn",
-        "draft_model.model.layers.1.self_attn.attn",
-    })
+    p = _make_proposer(
+        {
+            "draft_model.model.layers.0.self_attn.attn",
+            "draft_model.model.layers.1.self_attn.attn",
+        }
+    )
 
     created_groups = []
 
     def make_group(**kwargs):
         g = mock.MagicMock()
         g.kv_cache_group_id = kwargs["kv_cache_group_id"]
-        g.get_metadata_builder.return_value.kv_cache_spec.block_size = (
-            kwargs["kv_cache_spec"].block_size
-        )
+        g.get_metadata_builder.return_value.kv_cache_spec.block_size = kwargs[
+            "kv_cache_spec"
+        ].block_size
         created_groups.append(g)
         return g
 
@@ -220,6 +227,7 @@ def test_initialize_attn_backend_multi_group_creates_two_groups():
 # validate_same_kv_cache_group — must be no-op (no assert)
 # ---------------------------------------------------------------------------
 
+
 def test_validate_same_kv_cache_group_no_longer_raises():
     """Base class validate_same_kv_cache_group must not raise for multi-group."""
     spec_a = mock.MagicMock()
@@ -235,6 +243,7 @@ def test_validate_same_kv_cache_group_no_longer_raises():
 # ---------------------------------------------------------------------------
 # Gemma4Proposer._build_layer_spec_mapping — KV-sharing fallback
 # ---------------------------------------------------------------------------
+
 
 def test_gemma4_build_layer_spec_mapping_kv_sharing_fallback():
     """Layer without own spec in UniformTypeKVCacheSpecs inherits target's spec."""

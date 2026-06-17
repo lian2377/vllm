@@ -1662,9 +1662,9 @@ class SpecDecodeBaseProposer:
             )
         else:
             self.kv_cache_gid = 0
-            self.block_size = (
-                kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-            )
+            self.block_size = kv_cache_config.kv_cache_groups[
+                0
+            ].kv_cache_spec.block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(

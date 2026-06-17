@@ -8,6 +8,7 @@ MoE deployments of these models to fall back to MARLIN.
 
 These tests run without GPU; we only exercise the staticmethod whitelist.
 """
+
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp4,

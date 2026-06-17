@@ -47,12 +47,22 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
-    # Not required functions
     def tie_weights(self, layer: torch.nn.Module, *args, **kwargs):
         """Tie layer's weights for the layer from another layer/tensors.
 
-        Expects create_weights to have been called before on the layer."""
-        raise NotImplementedError
+        Default: when lm_head shares weights with the (unquantized) embedding,
+        the quantized path is no longer applicable — swap to
+        UnquantizedEmbeddingMethod and delegate the bind. Quant methods that
+        need custom tying logic can still override.
+        """
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            UnquantizedEmbeddingMethod,
+        )
+
+        embed_tokens = args[0] if args else kwargs["embed_tokens"]
+        unquant = UnquantizedEmbeddingMethod()
+        layer.quant_method = unquant
+        return unquant.tie_weights(layer, embed_tokens)
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.

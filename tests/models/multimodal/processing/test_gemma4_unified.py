@@ -203,3 +203,55 @@ def test_limit_mm_per_prompt(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+def test_gemma4_unified_maps_nested_embed_vision_checkpoint_keys():
+    """AxionML-style NVFP4 checkpoints nest the vision pipeline under
+    model.embed_vision.*: patch/pos weights belong to vision_embedder, and
+    the projection lives in multimodal_embedder.* -> embed_vision."""
+    pytest.importorskip("transformers.models.gemma4_unified")
+    from vllm.model_executor.models.gemma4_unified import (
+        Gemma4UnifiedForConditionalGeneration,
+    )
+
+    mapper = Gemma4UnifiedForConditionalGeneration.hf_to_vllm_mapper
+    checkpoint_keys = {
+        "model.embed_audio.embedding_projection.weight": 0,
+        "model.embed_vision.multimodal_embedder.embedding_projection.weight": 0,
+        "model.embed_vision.patch_dense.weight": 0,
+        "model.embed_vision.patch_dense.bias": 0,
+        "model.embed_vision.patch_ln1.weight": 0,
+        "model.embed_vision.patch_ln2.bias": 0,
+        "model.embed_vision.pos_embedding": 0,
+        "model.embed_vision.pos_norm.weight": 0,
+        "model.language_model.embed_tokens.weight": 0,
+    }
+
+    mapped = set(mapper.apply_dict(checkpoint_keys))
+
+    assert mapped == {
+        "embed_audio.embedding_projection.weight",
+        "embed_vision.embedding_projection.weight",
+        "vision_embedder.patch_dense.weight",
+        "vision_embedder.patch_dense.bias",
+        "vision_embedder.patch_ln1.weight",
+        "vision_embedder.patch_ln2.bias",
+        "vision_embedder.pos_embedding",
+        "vision_embedder.pos_norm.weight",
+        "language_model.model.embed_tokens.weight",
+    }
+
+
+def test_gemma4_unified_maps_flat_embed_vision_projection_key():
+    """The generic model.embed_vision. rule still routes a directly-nested
+    projection (non-multimodal_embedder layout) to embed_vision."""
+    pytest.importorskip("transformers.models.gemma4_unified")
+    from vllm.model_executor.models.gemma4_unified import (
+        Gemma4UnifiedForConditionalGeneration,
+    )
+
+    mapper = Gemma4UnifiedForConditionalGeneration.hf_to_vllm_mapper
+
+    assert mapper.apply_list(
+        ["model.embed_vision.embedding_projection.weight"]
+    ) == ["embed_vision.embedding_projection.weight"]

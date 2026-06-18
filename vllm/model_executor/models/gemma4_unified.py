@@ -237,6 +237,15 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.embed_audio.": "embed_audio.",
+            # Some checkpoints nest the whole vision pipeline under
+            # model.embed_vision.*: the patch embedder (patch_*/pos_*) maps
+            # to vision_embedder, while the multimodal projection lives in a
+            # multimodal_embedder.* submodule that maps to embed_vision.
+            # These specific rules must precede the generic model.embed_vision.
+            # rule (prefixes are applied in order).
+            "model.embed_vision.multimodal_embedder.": "embed_vision.",
+            "model.embed_vision.patch_": "vision_embedder.patch_",
+            "model.embed_vision.pos_": "vision_embedder.pos_",
             "model.embed_vision.": "embed_vision.",
             "model.language_model.": "language_model.model.",
             "model.vision_embedder.": "vision_embedder.",

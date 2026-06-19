@@ -70,6 +70,21 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def _vision_patch_pixels(vision_config) -> int:
+    """Flattened pixel dimension of a single pooled patch.
+
+    The image processor groups ``pooling_kernel_size`` raw patches per side
+    into one unit (see ``Gemma4ProcessingInfo``), so the encoder-free
+    embedder consumes ``(patch_size * pooling_kernel_size) ** 2 * 3`` pixels.
+    Derive it from the patch geometry instead of ``model_patch_size``, which
+    some checkpoint configs omit (then resolves to a wrong transformers
+    default) and which is the lone field that diverges from the unit used by
+    the rest of the processing code.
+    """
+    unit = vision_config.patch_size * vision_config.pooling_kernel_size
+    return unit**2 * 3
+
+
 class Gemma4UnifiedVisionEmbedder(nn.Module):
     """Encoder-free vision embedder for Gemma4 Unified variants.
 
@@ -82,7 +97,7 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
 
     def __init__(self, config, quant_config=None, prefix=""):
         super().__init__()
-        patch_dim = config.model_patch_size**2 * 3
+        patch_dim = _vision_patch_pixels(config)
         mm_embed_dim = config.mm_embed_dim
 
         self.patch_ln1 = nn.LayerNorm(patch_dim)

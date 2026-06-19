@@ -255,3 +255,20 @@ def test_gemma4_unified_maps_flat_embed_vision_projection_key():
     assert mapper.apply_list(
         ["model.embed_vision.embedding_projection.weight"]
     ) == ["embed_vision.embedding_projection.weight"]
+
+
+def test_vision_patch_pixels_derives_from_patch_and_pooling():
+    """patch_dense input must be (patch_size * pooling_kernel_size)**2 * 3,
+    matching the processor's pooled unit. AxionML/Gemma-4-12B-NVFP4 uses
+    patch_size=16, pooling_kernel_size=3 -> 6912; the standard pooling=1 case
+    stays at patch_size**2 * 3 -> 768."""
+    pytest.importorskip("transformers.models.gemma4_unified")
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.gemma4_unified import _vision_patch_pixels
+
+    axionml = SimpleNamespace(patch_size=16, pooling_kernel_size=3)
+    assert _vision_patch_pixels(axionml) == 6912
+
+    standard = SimpleNamespace(patch_size=16, pooling_kernel_size=1)
+    assert _vision_patch_pixels(standard) == 768

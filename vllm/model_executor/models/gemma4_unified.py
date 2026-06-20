@@ -288,10 +288,15 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.audio_tower = None
 
         # ---- Encoder-free vision embedder ----
+        # The vision embedder is full precision in the checkpoint (its
+        # patch_dense/projection weights carry no quant scales), so it is never
+        # quantized — mirror embed_vision below by passing no quant_config.
+        # Passing the model quant_config would build patch_dense as an NVFP4
+        # (packed) linear, mismatching the BF16 checkpoint weight on load.
         self.vision_embedder = (
             Gemma4UnifiedVisionEmbedder(
                 config.vision_config,
-                quant_config=quant_config,
+                quant_config=None,
                 prefix=maybe_prefix(prefix, "vision_embedder"),
             )
             if config.vision_config is not None

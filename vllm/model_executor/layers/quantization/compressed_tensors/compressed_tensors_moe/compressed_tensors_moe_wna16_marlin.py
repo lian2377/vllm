@@ -80,7 +80,17 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             else:
                 scale = kInt4StaticGroupScale
         elif self.num_bits == 8:
-            assert self.group_size == -1
+            if not self.symmetric:
+                raise ValueError(
+                    "CompressedTensorsWNA16MarlinMoEMethod does not support "
+                    "asymmetric int8 MoE weights."
+                )
+            if self.group_size not in (-1, 32, 64, 128):
+                raise ValueError(
+                    "CompressedTensorsWNA16MarlinMoEMethod only supports "
+                    "int8 group_size in {-1, 32, 64, 128}, but got "
+                    f"{self.group_size}."
+                )
             scale = kInt8StaticGroupScale
         else:
             raise ValueError(

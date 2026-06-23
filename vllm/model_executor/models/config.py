@@ -75,12 +75,32 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
             return
 
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         max_head_dim = max(head_dim, global_head_dim)
 
-        if is_fa_version_supported(4) and max_head_dim <= 512:
+        # FA2 caps at head_size 256, so the global_head_dim layers can only
+        # be served by FA4. But on Blackwell (SM100+, incl. Jetson Thor),
+        # FA4 itself silently falls back to FA2 for head_size > 128 (except
+        # 192) due to TMEM capacity limits (see fa_utils.get_flash_attn_version),
+        # which then crashes with "head dimension at most 256". Only treat
+        # FA4 as viable when it won't be downgraded for max_head_dim.
+        device_capability = current_platform.get_device_capability()
+        blackwell_fa4_downgrade = (
+            device_capability is not None
+            and device_capability.major >= 10
+            and max_head_dim > 128
+            and max_head_dim != 192
+        )
+        fa4_viable = (
+            is_fa_version_supported(4)
+            and max_head_dim <= 512
+            and not blackwell_fa4_downgrade
+        )
+
+        if fa4_viable:
             if (
                 vllm_config.attention_config.flash_attn_version is None
                 and vllm_config.attention_config.backend
@@ -94,14 +114,18 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     head_dim,
                     global_head_dim,
                 )
-        elif vllm_config.attention_config.backend is None:
+        elif vllm_config.attention_config.backend in (
+            None,
+            AttentionBackendEnum.FLASH_ATTN,
+        ):
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). FA4 not available, "
-                "forcing TRITON_ATTN backend.",
+                "(head_dim=%d, global_head_dim=%d). FA4 cannot serve "
+                "head_size=%d (FA2 caps at 256); forcing TRITON_ATTN backend.",
                 head_dim,
                 global_head_dim,
+                max_head_dim,
             )
 
 
